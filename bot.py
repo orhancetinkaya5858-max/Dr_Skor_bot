@@ -4,13 +4,29 @@ import aioschedule
 from aiogram import Bot, Dispatcher, types
 from aiogram.utils import executor
 from datetime import datetime
+from flask import Flask
+from threading import Thread
 
-# Tokeni gizli tutmak için Render ayarlarından alacağız
+# --- RENDER UYUMAMA SERVİSİ (FLASK) ---
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Dr. Skor Bot Aktif!"
+
+def run():
+    # Render'ın beklediği port üzerinden sunucuyu başlatır
+    app.run(host='0.0.0.0', port=10000)
+
+def keep_alive():
+    t = Thread(target=run)
+    t.start()
+# ---------------------------------------
+
 TOKEN = os.getenv("BOT_TOKEN")
 bot = Bot(token=TOKEN)
 dp = Dispatcher(bot)
 
-# Verileri tutmak için geçici sözlük
 stats = {}
 
 def get_rank(count):
@@ -48,10 +64,7 @@ async def count_messages(message: types.Message):
 
 async def send_report(period_key, title):
     if not stats: return
-    
-    # Skorları sırala
     sorted_users = sorted(stats.items(), key=lambda x: x[1][period_key], reverse=True)[:10]
-    
     report_text = f"📋 **{title}**\n\n"
     target_chat = None
     
@@ -59,28 +72,19 @@ async def send_report(period_key, title):
         rank = get_rank(data[period_key])
         report_text += f"{i}. {data['name']} - {data[period_key]} Mesaj\n   ┗ 💉 {rank}\n"
         target_chat = data["chat_id"]
-        
-        # Günlük rapor sonrası günlük sayacı sıfırla
         if period_key == "d": data["d"] = 0
-        # Haftalık sonrası haftalık sayacı sıfırla
         if period_key == "w": data["w"] = 0
     
     if target_chat:
         await bot.send_message(target_chat, report_text)
 
 async def scheduler():
-    # Her gün 00:00'da günlük rapor
     aioschedule.every().day.at("00:00").do(send_report, "d", "Günün Reçetesi")
-    
     while True:
-        # Pazar günü haftalık rapor ekle
         if datetime.now().weekday() == 6 and datetime.now().strftime("%H:%M") == "23:59":
             await send_report("w", "Haftalık Check-up")
-        
-        # Ayın 30'u veya son günü aylık rapor
         if datetime.now().day == 30 and datetime.now().strftime("%H:%M") == "23:58":
             await send_report("m", "Aylık Sağlık Raporu")
-            
         await aioschedule.run_pending()
         await asyncio.sleep(60)
 
@@ -88,4 +92,6 @@ async def on_startup(_):
     asyncio.create_task(scheduler())
 
 if __name__ == '__main__':
+    # Bot çalışırken aynı anda web sunucusunu da başlatıyoruz
+    keep_alive()
     executor.start_polling(dp, on_startup=on_startup, skip_updates=True)
