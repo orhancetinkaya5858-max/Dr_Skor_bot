@@ -1,97 +1,83 @@
 import os
 import asyncio
-import aioschedule
 from aiogram import Bot, Dispatcher, types
 from aiogram.utils import executor
 from datetime import datetime
 from flask import Flask
 from threading import Thread
 
-# --- RENDER UYUMAMA SERVİSİ (FLASK) ---
+# --- Flask (Botu ayakta tutmak için) ---
 app = Flask('')
-
 @app.route('/')
-def home():
-    return "Dr. Skor Bot Aktif!"
-
-def run():
-    # Render'ın beklediği port üzerinden sunucuyu başlatır
-    app.run(host='0.0.0.0', port=10000)
-
-def keep_alive():
-    t = Thread(target=run)
-    t.start()
-# ---------------------------------------
+def home(): return "Dr. Skor Bot Aktif!"
+def run(): app.run(host='0.0.0.0', port=10000)
+def keep_alive(): Thread(target=run).start()
 
 TOKEN = os.getenv("BOT_TOKEN")
 bot = Bot(token=TOKEN)
 dp = Dispatcher(bot)
 
+# Veri yapısı: stats[chat_id][user_id] = {'name': ..., 'd': 0}
 stats = {}
-
-def get_rank(count):
-    if count < 100: return "Tıp Öğrencisi 🎓"
-    if count < 500: return "Stajyer Doktor 🩺"
-    if count < 2000: return "Uzman Doktor 👨‍⚕️"
-    if count < 5000: return "Doçent 🔬"
-    if count < 10000: return "Profesör 🏛️"
-    return "Başhekim 👑"
 
 @dp.message_handler(commands=['skorum', 'profil', 'skor'])
 async def my_stats(message: types.Message):
+    chat_id = message.chat.id
     uid = message.from_user.id
-    if uid in stats:
-        data = stats[uid]
-        rank = get_rank(data['m'])
-        await message.reply(f"📊 **{data['name']} Analiz Raporu**\n\n"
-                           f"🔹 Günlük: {data['d']}\n"
-                           f"🔹 Haftalık: {data['w']}\n"
-                           f"🔹 Aylık: {data['m']}\n"
-                           f"🩺 Unvan: {rank}")
+    if chat_id in stats and uid in stats[chat_id]:
+        data = stats[chat_id][uid]
+        await message.reply(f"📊 **Kişisel Analiz**\n\n🔹 Günlük: {data['d']}\n🔹 Toplam: {data['m']}")
     else:
-        await message.reply("Henüz bir reçeteniz yok Doktor! Mesaj yazarak başlayın.")
+        await message.reply("Henüz veriniz bulunmuyor.")
 
 @dp.message_handler()
 async def count_messages(message: types.Message):
     if message.chat.type == 'private': return
+    
+    chat_id = message.chat.id
     uid = message.from_user.id
-    if uid not in stats:
-        stats[uid] = {"name": message.from_user.full_name, "d": 0, "w": 0, "m": 0, "chat_id": message.chat.id}
+    name = message.from_user.full_name
     
-    stats[uid]["d"] += 1
-    stats[uid]["w"] += 1
-    stats[uid]["m"] += 1
+    if chat_id not in stats: stats[chat_id] = {}
+    if uid not in stats[chat_id]:
+        stats[chat_id][uid] = {"name": name, "d": 0, "m": 0}
+    
+    stats[chat_id][uid]["d"] += 1
+    stats[chat_id][uid]["m"] += 1
 
-async def send_report(period_key, title):
-    if not stats: return
-    sorted_users = sorted(stats.items(), key=lambda x: x[1][period_key], reverse=True)[:10]
-    report_text = f"📋 **{title}**\n\n"
-    target_chat = None
-    
-    for i, (uid, data) in enumerate(sorted_users, 1):
-        rank = get_rank(data[period_key])
-        report_text += f"{i}. {data['name']} - {data[period_key]} Mesaj\n   ┗ 💉 {rank}\n"
-        target_chat = data["chat_id"]
-        if period_key == "d": data["d"] = 0
-        if period_key == "w": data["w"] = 0
-    
-    if target_chat:
-        await bot.send_message(target_chat, report_text)
+async def send_daily_report():
+    for chat_id, users in stats.items():
+        # Sıralama (En çok mesaj atan)
+        sorted_users = sorted(users.items(), key=lambda x: x[1]['d'], reverse=True)[:15]
+        
+        total_msg = sum(u['d'] for u in users.values())
+        active_users = len([u for u in users.values() if u['d'] > 0])
+        
+        report_text = "📋 **Grup Günlük Aktiflik Listesi**\n\nKullanıcı → Mesaj\n"
+        for i, (uid, data) in enumerate(sorted_users, 1):
+            report_text += f"{i}. {data['name']} : {data['d']}\n"
+        
+        report_text += f"\n📊 Bu Sıralama geçtiğimiz Güne aittir.\n├ Toplam aktif kullanıcı: {active_users}\n└ Toplam mesaj: {total_msg}"
+        
+        try:
+            await bot.send_message(chat_id, report_text)
+            # Günlük sayacı sıfırla
+            for uid in users: stats[chat_id][uid]['d'] = 0
+        except Exception as e:
+            print(f"Rapor gönderilemedi: {e}")
 
 async def scheduler():
-    aioschedule.every().day.at("00:00").do(send_report, "d", "Günün Reçetesi")
     while True:
-        if datetime.now().weekday() == 6 and datetime.now().strftime("%H:%M") == "23:59":
-            await send_report("w", "Haftalık Check-up")
-        if datetime.now().day == 30 and datetime.now().strftime("%H:%M") == "23:58":
-            await send_report("m", "Aylık Sağlık Raporu")
-        await aioschedule.run_pending()
-        await asyncio.sleep(60)
+        now = datetime.now()
+        # Türkiye saati 00:00 kontrolü (Basit döngü)
+        if now.hour == 0 and now.minute == 0:
+            await send_daily_report()
+            await asyncio.sleep(65) # Bir dakika bekle ki tekrar göndermesin
+        await asyncio.sleep(30)
 
 async def on_startup(_):
     asyncio.create_task(scheduler())
 
 if __name__ == '__main__':
-    # Bot çalışırken aynı anda web sunucusunu da başlatıyoruz
     keep_alive()
     executor.start_polling(dp, on_startup=on_startup, skip_updates=True)
